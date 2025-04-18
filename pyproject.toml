@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "semblance"
+version = "0.1.0"
+description = "Bares some semblance to a different project I made before..."
+authors = ["Lilith"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.13"
+buttplug-py = "^0.2.0"
+loguru = "^0.7.3"
+watchfiles = "^1.0.5"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
