@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import time
+import re
 
 from queue import Queue, Empty
 from pathlib import Path
@@ -10,19 +11,27 @@ from threading import Thread
 from loguru import logger
 
 from semblance.control_messages import AbstractControlMessage, DummyMessage, KillMessage
-from semblance.game_event_messages import AbstractGameEventMessage, ConsoleEventMessage
+from semblance.game_event_messages import (AbstractGameEventMessage,
+                                           ConsoleEventMessage,
+                                           ConsoleChatMessage,
+                                           ConsoleKillMessage,
+                                           CONSOLE_KILL_REX,
+                                           CONSOLE_CHAT_REX)
 
 
 def tf2_console_handler(reader: TF2ConsoleReader) -> None:
     logger.info("Console Handler starting...")
     async_el = asyncio.new_event_loop()
 
-    async_el.run_until_complete(reader.start_watching())
-
-    logger.debug(f"Ending async event loop...")
-    async_el.stop()
-    async_el.close()
-    logger.success("Console Handler finishing...")
+    try:
+        async_el.run_until_complete(reader.start_watching())
+    except Exception as e:
+        logger.error(f"Console Reader encountered an exception during operation: {e}")
+    finally:
+        logger.debug(f"Ending async event loop...")
+        async_el.stop()
+        async_el.close()
+        logger.success("Console Handler exiting...")
 
 
 class TF2ConsoleReader:
@@ -54,17 +63,34 @@ class TF2ConsoleReader:
 
     async def start_watching(self) -> None:
         self._seek_offset = self.file_path.stat().st_size
-        _file_handle = open(self.file_path, 'r')
+        # We read the file as UTF8, but in old Source 1 games most files are written with UTF16 or something not quite
+        # UTF8, so while most reads will work (because the UTF8 codec contains most of the UTF16 codec), some will fail,
+        # so we ignore the decode errors and hope to pass on without issue.
+        _file_handle = open(self.file_path, 'r', encoding='utf8', errors='ignore')
         _file_handle.seek(self._seek_offset)
 
         while True:
+            _size = self.file_path.stat().st_size
+            if _file_handle.tell() > _size:
+                # If file gets shrunk while we have it open, reset cursor to end
+                _file_handle.seek(_size)
             _data = _file_handle.read().strip()
+
             if _data:
                 for line in _data.splitlines():
                     if len(line.strip()) < 1:
                         continue
+                    chat_match = re.match(CONSOLE_CHAT_REX, line)
+                    kill_match = re.match(CONSOLE_KILL_REX, line)
+                    if chat_match:
+                        _msg = ConsoleChatMessage(chat_match, self.file_path.name, self.__class__.__name__)
+                    elif kill_match:
+                        _msg = ConsoleKillMessage(kill_match, self.file_path.name, self.__class__.__name__)
+                    else:
+                        _msg = ConsoleEventMessage(line, self.file_path.name, self.__class__.__name__)
+
                     self.output_queue.put(
-                        ConsoleEventMessage(line, self.file_path.name, self.__class__.__name__),
+                        _msg,
                         block=True
                     )
 
@@ -91,6 +117,7 @@ def main():
     _control_queue = Queue()
     _control_queue.put(DummyMessage("MainTestThread-init"))
     _output_queue = Queue()
+    # G
     _path = Path("G:\\SteamLibrary\\steamapps\\common\\Team Fortress 2\\tf\\console.log")
     _watcher = TF2ConsoleReader(_output_queue, _control_queue, _path)
 
@@ -116,8 +143,15 @@ def main():
     except KeyboardInterrupt:
         logger.info(f"Keyboard interrupt detected, exiting...")
 
-    _control_queue.put(KillMessage("ConsoleHandlerMainTestLoop"), block=True)
-    _control_queue.join()
+    if _thread.is_alive():
+        # If the thread has died (due to some error that wasn't handled), nothing will consume the kill message,
+        # and thus we get stuck here forever.
+        _control_queue.put(KillMessage("ConsoleHandlerMainTestLoop"), block=True)
+        _control_queue.join()
+    else:
+        logger.warning(f"We detected that the ConsoleHandler thread died at some point... exiting.")
+
+    # If the thread has died prematurely, we can still join it (and should - for memory management reasons)
     _thread.join()
 
 
